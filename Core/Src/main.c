@@ -22,7 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "adis16488a.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -52,6 +52,8 @@ osThreadId defaultTaskHandle;
 osThreadId imuTaskHandle;
 osThreadId uartTaskHandle;
 osMessageQId ImuDataQueueHandle;
+osSemaphoreId ImuDataReadySemHandle;
+osSemaphoreId ImuDmaDoneSemHandle;
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -73,7 +75,18 @@ void StartUartTask(void const * argument);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+	if (GPIO_Pin == GPIO_PIN_0) {
+		osSemaphoreRelease(ImuDataReadySemHandle);
+	}
+}
 
+void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi) {
+	if (hspi->Instance == SPI1) {
+		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
+		osSemaphoreRelease(ImuDmaDoneSemHandle);
+	}
+}
 /* USER CODE END 0 */
 
 /**
@@ -116,6 +129,15 @@ int main(void)
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
   /* USER CODE END RTOS_MUTEX */
+
+  /* Create the semaphores(s) */
+  /* definition and creation of ImuDataReadySem */
+  osSemaphoreDef(ImuDataReadySem);
+  ImuDataReadySemHandle = osSemaphoreCreate(osSemaphore(ImuDataReadySem), 0); // Depleted //1);
+
+  /* definition and creation of ImuDmaDoneSem */
+  osSemaphoreDef(ImuDmaDoneSem);
+  ImuDmaDoneSemHandle = osSemaphoreCreate(osSemaphore(ImuDmaDoneSem), 0); // Depleted //1);
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
   /* add semaphores, ... */
@@ -419,7 +441,19 @@ void StartImuTask(void const * argument)
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+	  osSemaphoreWait(ImuDataReadySemHandle, osWaitForever);
+	  adis16488a_burst_read();
+	  osSemaphoreWait(ImuDmaDoneSemHandle, osWaitForever);
+
+	  adis16488a_converted_t ImuData;
+	  ImuData.gyro_x = (int16_t)buf_spi1_rx[1] * GYRO_SCALE;
+	  ImuData.gyro_y = (int16_t)buf_spi1_rx[2] * GYRO_SCALE;
+	  ImuData.gyro_z = (int16_t)buf_spi1_rx[3] * GYRO_SCALE;
+	  ImuData.accl_x = (int16_t)buf_spi1_rx[4] * ACCL_SCALE;
+	  ImuData.accl_y = (int16_t)buf_spi1_rx[5] * ACCL_SCALE;
+	  ImuData.accl_z = (int16_t)buf_spi1_rx[6] * ACCL_SCALE;
+
+	  osMessagePut(ImuDataQueueHandle, (uint32_t)&ImuData, osWaitForever);
   }
   /* USER CODE END StartImuTask */
 }
@@ -437,7 +471,14 @@ void StartUartTask(void const * argument)
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+	  adis16488a_converted_t ImuData;
+
+	  osEvent Event = osMessageGet(ImuDataQueueHandle, osWaitForever);
+
+	  if (Event.status == osEventMessage) {
+		  ImuData = *(adis16488a_converted_t*)Event.value.p;
+		  HAL_UART_Transmit(&huart2, (uint8_t*)&ImuData, sizeof(ImuData), HAL_MAX_DELAY);
+	  }
   }
   /* USER CODE END StartUartTask */
 }
